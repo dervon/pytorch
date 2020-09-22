@@ -397,6 +397,8 @@ struct C10_API TensorOptions {
             return DispatchKey::IDEEP;
           case DeviceType::HIP:
             return DispatchKey::HIP;
+          case DeviceType::FPGA:
+            return DispatchKey::FPGA;
           case DeviceType::MSNPU:
             return DispatchKey::MSNPU;
           case DeviceType::XLA:
@@ -618,6 +620,8 @@ inline DispatchKey computeDispatchKey(TensorOptions options) {
   return options.computeDispatchKey();
 }
 
+// We deliberately ignore handling AutogradCPU/CUDA/XLA... keys to
+// avoid adding asymmetry in device <--> Autograd dispatch key mapping.
 inline DeviceType computeDeviceType(DispatchKey tid) {
   if (tid == DispatchKey::CPU) {
     return DeviceType::CPU;
@@ -625,6 +629,8 @@ inline DeviceType computeDeviceType(DispatchKey tid) {
     return DeviceType::CUDA;
   } else if (tid == DispatchKey::HIP) {
     return DeviceType::HIP;
+  } else if (tid == DispatchKey::FPGA) {
+    return DeviceType::FPGA;
   } else if (tid == DispatchKey::MKLDNN) {
     return DeviceType::MKLDNN;
   } else if (tid == DispatchKey::OpenGL) {

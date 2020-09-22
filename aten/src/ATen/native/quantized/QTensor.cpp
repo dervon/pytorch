@@ -40,8 +40,7 @@ Tensor quantize_per_channel_cpu(
     const Tensor& zero_points,
     int64_t axis,
     ScalarType dtype) {
-  auto quantizer =
-      make_per_channel_affine_quantizer(scales, zero_points, axis, dtype);
+  auto quantizer = make_per_channel_affine_quantizer(scales, zero_points, axis, dtype);
   return quantizer->quantize(self);
 }
 
@@ -49,7 +48,7 @@ Tensor dequantize_quant(const Tensor& self) {
   return get_qtensorimpl(self)->quantizer()->dequantize(self);
 }
 
-std::vector<Tensor> dequantize_tensors_quant(TensorList tensors) {
+std::vector<Tensor> dequantize_tensors_quantized_cpu(TensorList tensors) {
   std::vector<Tensor> dequantized_tensors;
   for (auto i = 0; i < tensors.size(); ++i) {
     dequantized_tensors.push_back(tensors[i].dequantize());
@@ -69,25 +68,21 @@ int64_t q_zero_point_quant(const Tensor& self) {
   return static_cast<PerTensorAffineQuantizer*>(quantizer.get())->zero_point();
 }
 
-Tensor q_per_channel_scales_quant(const Tensor& self) {
+Tensor q_per_channel_scales(const Tensor& self) {
   auto quantizer = get_qtensorimpl(self)->quantizer();
-  TORCH_CHECK(quantizer->qscheme() == kPerChannelAffine);
-  return static_cast<PerChannelAffineQuantizer*>(quantizer.get())
-      ->scales()
-      .to(kDouble);
+  TORCH_CHECK(quantizer->qscheme() == kPerChannelAffine || quantizer->qscheme() == kPerChannelAffineFloatQParams);
+  return static_cast<PerChannelAffineQuantizer*>(quantizer.get())->scales();
 }
 
-Tensor q_per_channel_zero_points_quant(const Tensor& self) {
+Tensor q_per_channel_zero_points(const Tensor& self) {
   auto quantizer = get_qtensorimpl(self)->quantizer();
-  TORCH_CHECK(quantizer->qscheme() == kPerChannelAffine);
-  return static_cast<PerChannelAffineQuantizer*>(quantizer.get())
-      ->zero_points()
-      .to(kLong);
+  TORCH_CHECK(quantizer->qscheme() == kPerChannelAffine || quantizer->qscheme() == kPerChannelAffineFloatQParams);
+  return static_cast<PerChannelAffineQuantizer*>(quantizer.get())->zero_points();
 }
 
-int64_t q_per_channel_axis_quant(const Tensor& self) {
+int64_t q_per_channel_axis(const Tensor& self) {
   auto quantizer = get_qtensorimpl(self)->quantizer();
-  TORCH_CHECK(quantizer->qscheme() == kPerChannelAffine);
+  TORCH_CHECK(quantizer->qscheme() == kPerChannelAffine || quantizer->qscheme() == kPerChannelAffineFloatQParams);
   return static_cast<PerChannelAffineQuantizer*>(quantizer.get())->axis();
 }
 
@@ -141,11 +136,6 @@ Tensor& set_quantizer_(Tensor& self, ConstQuantizerPtr quantizer) {
 Tensor quantized_clone(
     const Tensor& self,
     c10::optional<c10::MemoryFormat> optional_memory_format) {
-  // TODO: add per channel support
-  TORCH_INTERNAL_ASSERT(
-      self.qscheme() == at::kPerTensorAffine,
-      "clone for quantized Tensor only works for PerTensorAffine scheme right now");
-
   auto memory_format =
       optional_memory_format.value_or(MemoryFormat::Contiguous);
 
@@ -158,19 +148,33 @@ Tensor quantized_clone(
     memory_format = self.suggest_memory_format();
   }
 
-  Tensor dst = at::_empty_affine_quantized(
-      self.sizes(),
-      self.options().memory_format(memory_format),
-      self.q_scale(),
-      self.q_zero_point(),
-      c10::nullopt);
+  Tensor dst;
+  if (self.qscheme() == at::kPerTensorAffine) {
+    dst = at::_empty_affine_quantized(
+        self.sizes(),
+        self.options().memory_format(memory_format),
+        self.q_scale(),
+        self.q_zero_point(),
+        c10::nullopt);
+  } else if (self.qscheme() == at::kPerChannelAffine) {
+    dst = at::_empty_per_channel_affine_quantized(
+        self.sizes(),
+        self.q_per_channel_scales(),
+        self.q_per_channel_zero_points(),
+        self.q_per_channel_axis(),
+        self.options().memory_format(memory_format),
+        c10::nullopt);
+  } else {
+    TORCH_CHECK(false, "clone for quantized Tensor only works for \
+      PerTensorAffine and PerChannelAffine qscheme right now");
+  }
 
   at::native::copy_(dst, self, false);
 
   return dst;
 }
 
-bool quantized_equal_cpu(const Tensor& self, const Tensor& other) {
+bool equal_quantized_cpu(const Tensor& self, const Tensor& other) {
   TORCH_CHECK(
       self.device().type() == kCPU && other.device().type() == kCPU,
       "quantized_equal is implemented only for the QuantizedCPU backend");
@@ -211,6 +215,10 @@ std::tuple<double, int64_t> _choose_qparams_per_tensor(
   auto input_contig = self.contiguous();
   float x_min = input_contig.min().item<float>();
   float x_max = input_contig.max().item<float>();
+
+  if (reduce_range && at::globalContext().qEngine() == at::QEngine::QNNPACK) {
+    reduce_range = false;
+  }
 
   auto q_params = quant_utils::ChooseQuantizationParams(
       /*min=*/x_min,
